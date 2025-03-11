@@ -1,15 +1,21 @@
 from typing import Any, Optional
 import asyncio
 import httpx
+import base64
+import os
+from pathlib import Path
 from mcp.server.models import InitializationOptions
 import mcp.types as types
 from mcp.server import NotificationOptions, Server
 import mcp.server.stdio
-import os
 
 TOGETHER_AI_BASE = "https://api.together.xyz/v1/images/generations"
 API_KEY = os.getenv("TOGETHER_AI_API_KEY")
 DEFAULT_MODEL = "black-forest-labs/FLUX.1-schnell"
+
+# Create a folder for saving images if it doesn't exist
+TMP_FOLDER = "/tmp/generated_images"
+os.makedirs(TMP_FOLDER, exist_ok=True)
 
 server = Server("image-gen")
 
@@ -42,6 +48,10 @@ async def handle_list_tools() -> list[types.Tool]:
                     "height": {
                         "type": "number",
                         "description": "Optional height for the image",
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": "Optional filename to save the image (without extension)",
                     },
                 },
                 "required": ["prompt", "model"],
@@ -101,6 +111,33 @@ async def make_together_request(
     return data
 
 
+def save_image_to_file(b64_image: str, filename: str = None) -> str:
+    """
+    Save the base64 encoded image to a file in the /tmp folder.
+    Returns the full path to the saved image.
+    """
+    # Generate a filename based on timestamp if not provided
+    if not filename:
+        import time
+        filename = f"image_{int(time.time())}"
+    
+    # Ensure filename doesn't have an extension
+    filename = Path(filename).stem
+    
+    # Create the full file path
+    file_path = os.path.join(TMP_FOLDER, f"{filename}.jpg")
+    
+    # Decode the base64 image and save to file
+    try:
+        image_data = base64.b64decode(b64_image)
+        with open(file_path, "wb") as f:
+            f.write(image_data)
+        return file_path
+    except Exception as e:
+        print(f"Error saving image: {e}")
+        return None
+
+
 @server.call_tool()
 async def handle_call_tool(
     name: str, arguments: dict | None
@@ -119,6 +156,7 @@ async def handle_call_tool(
         model = arguments.get("model")
         width = arguments.get("width")
         height = arguments.get("height")
+        filename = arguments.get("filename")
 
         if not prompt or not model:
             return [
@@ -139,10 +177,23 @@ async def handle_call_tool(
 
             try:
                 b64_image = response_data["data"][0]["b64_json"]
+                
+                # Save the image to a file
+                saved_path = save_image_to_file(b64_image, filename)
+                
+                # Include the saved file path in the response
+                if saved_path:
+                    response_text = f"Image saved to: {saved_path}"
+                else:
+                    response_text = "Failed to save image to file."
+                
                 return [
+                    # Return the image content for display
                     types.ImageContent(
                         type="image", data=b64_image, mimeType="image/jpeg"
-                    )
+                    ),
+                    # Also return text with the file path
+                    types.TextContent(type="text", text=response_text)
                 ]
             except (KeyError, IndexError) as e:
                 return [
